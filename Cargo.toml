@@ -1,0 +1,39 @@
+[package]
+name = "rim"
+version = "0.1.0"
+authors = ["eomain"]
+description = "Rouge image viewer"
+edition = "2018"
+
+[dependencies.rouge]
+path = "../rouge"
+
+[profile.dev]
+opt-level = 1
+debug = true
+debug-assertions = true
+overflow-checks = true
+lto = false
+panic = 'unwind'
+incremental = true
+codegen-units = 256
+
+
+[profile.release]
+opt-level = 3
+debug = false
+debug-assertions = false
+overflow-checks = false
+lto = true
+panic = 'unwind'
+incremental = false
+codegen-units = 8
+
+[profile.test]
+opt-level = 1
+debug = true
+debug-assertions = true
+overflow-checks = true
+lto = false
+incremental = true
+codegen-units = 256
