@@ -1,0 +1,9 @@
+
+Rim:
+
+An image viewer that supports many formats and animated images.
+Formats: bmp, ico, jpeg, gif, png, tiff, webp, avif, pnm, dds, tga
+Functions: panning, zooming, fullscreen, cycle
+
+License:
+Rim is distributed under the BSD-2-clause license.
