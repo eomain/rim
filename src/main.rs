@@ -1,71 +1,104 @@
 
 extern crate rouge;
 
-use std::{
-	fs::File, path::{Path, PathBuf}
+use std::path::Path;
+use rouge::{
+	Event, Widget, WidgetBuilder, WidgetWrap, WidgetUnwrap, Layout, LayoutExt,
+	Color, Align, Space, event::KeyMap, message::{Sender, WidgetChannelExt},
+	common::{ScrollRegion, ScrollRegionBuilder}
 };
-use rouge::{Event, Widget, Layout, Data, Color, event::MouseInput, message};
+
+fn get_image_paths<P: AsRef<Path>>(path: P) -> Vec<String> {
+	use lexical_sort::{StringSort, natural_lexical_only_alnum_cmp as cmp};
+
+	let paths = match path.as_ref().read_dir() {
+		Ok(p) => p,
+		_ => return Vec::new()
+	};
+
+	let mut paths = paths
+		.into_iter()
+		.filter_map(|e| e.ok().map(|e| e.path()))
+		.filter(|e| match e.extension().map(|e| e.to_str()).flatten() {
+			Some(ext) => match ext {
+				"bmp" | "ico" | "jpg" | "jpeg" | "gif" |
+				"png" | "tiff" | "webp" | "avif" | "pnm" |
+				"dds" | "tga" => true,
+				_ => false
+			},
+			_ => false
+		})
+		.filter_map(|e| e.to_str().map(|e| e.to_string()))
+		.collect::<Vec<_>>();
+	paths.string_sort_unstable(cmp);
+	paths
+}
 
 #[derive(Debug, Clone, PartialEq)]
 struct Gallery {
-	location: PathBuf,
 	index: usize,
-	images: Vec<PathBuf>
+	images: Vec<String>
 }
 
 impl Gallery {
 	fn new<P>(path: P) -> Self
-		where P: AsRef<Path> {
+	where P: AsRef<Path> {
+		let path = path.as_ref();
+		let current = |p: &Path| match std::env::current_dir() {
+			Ok(p) => p,
+			_ => p.to_path_buf()
+		};
+		let directory = if path.is_dir() {
+			path.to_path_buf()
+		} else {
+			match path.parent() {
+				Some(p) => {
+					if p == Path::new("") {
+						current(p)
+					} else {
+						p.to_path_buf()
+					}
+				},
+				_ => current(path)
+			}
+		};
+		let images = get_image_paths(&directory);
+		let index = images.iter().position(|i| Path::new(i) == path).unwrap_or(0);
+
 		Self {
-			location: path.as_ref().into(),
-			index: 0,
-			images: path.as_ref()
-				.read_dir()
-				.map(|e| e.into_iter()
-					.skip_while(|e| e.is_err())
-					.map(|e| e.unwrap().path())
-					.filter(|e| match e.extension().map(|e| e.to_str()).flatten() {
-						Some(ext) => match ext {
-							"bmp" | "ico" | "jpg" | "jpeg" | "gif" |
-							"png" | "tiff" | "webp" | "avif" | "pnm" |
-							"dds" | "tga" => true,
-							_ => false
-						},
-						_ => false
-					}))
-				.map(|a| a.collect())
-				.unwrap_or(Vec::new())
+			index,
+			images
 		}
 	}
-	
-	fn move_to<P>(&mut self, path: P)
-		where P: AsRef<Path> {
-		match self.images.iter().position(|i| i == path.as_ref()) {
-			Some(index) => {
-				self.index = index;
-			},
-			_ => ()
+
+	fn next(&mut self) -> Option<&str> {
+		if self.images.is_empty() {
+			return None;
 		}
-	}
-	
-	fn next(&mut self) -> Option<&PathBuf> {
 		if self.index == self.images.len() - 1 {
 			self.index = 0;
 		} else {
 			self.index += 1;
 		}
-		self.images.get(self.index)
+		self.get()
 	}
-	
-	fn prev(&mut self) -> Option<&PathBuf> {
+
+	fn prev(&mut self) -> Option<&str> {
+		if self.images.is_empty() {
+			return None;
+		}
 		if self.index == 0 {
 			self.index = self.images.len() - 1;
 		} else {
 			self.index -= 1;
 		}
-		self.images.get(self.index)
+		self.get()
 	}
-	
+
+	fn get(&self) -> Option<&str> {
+		self.images.get(self.index).map(|i| i.as_str())
+	}
+
 	fn position(&self) -> usize {
 		self.index
 	}
@@ -75,232 +108,400 @@ impl Gallery {
 	}
 }
 
-fn window_title(name: &str, size: (u32, u32)) -> String {
-	format!("{} - ({} x {}) - Rim", name, size.0, size.1)
+#[derive(Clone, Event)]
+struct ImageViewer {
+	widget: rouge::WidgetObject,
+	events: rouge::event::Events<Self>,
+	scale: f64,
+	gallery: Gallery
 }
 
-fn image_next(i: &mut rouge::Image) {
-	let (path, size) = match i.data_mut().get_mut::<Gallery>("gallery")
-		.map(|g| (g.next().map(|p| p.clone()), g.size())) {
-		None => return,
-		Some((p, s)) => (p, s)
-	};
-	
-	if size > 1 {
-		if let Some(path) = path {
-			i.set_with_path(&path);
-			if let Some(name) = path.file_name().map(|p| p.to_str()).flatten() {
-				let data = message::Data::new(window_title(name, i.dimensions()));
-				i.emit_with_data("title", data);
-			}
-			
-			scale_image(i);
-		}
-	}
-}
+impl ImageViewer {
+	fn new(gallery: Gallery) -> Self {
+		let image = if let Some(path) = gallery.get() {
+			rouge::Image::from_path(path)
+		} else {
+			rouge::Image::new()
+		};
 
-fn image_prev(i: &mut rouge::Image) {
-	let (path, size) = match i.data_mut().get_mut::<Gallery>("gallery")
-		.map(|g| (g.prev().map(|p| p.clone()), g.size())) {
-		None => return,
-		Some((p, s)) => (p, s)
-	};
-	
-	if size > 1 {
-		if let Some(path) = path {
-			i.set_with_path(&path);
-			if let Some(name) = path.file_name().map(|p| p.to_str()).flatten() {
-				let data = message::Data::new(window_title(name, i.dimensions()));
-				i.emit_with_data("title", data);
-			}
-			scale_image(i);
-		}
-	}
-}
-
-fn scale_image(i: &mut rouge::Image) {
-	let scale = *i.data_mut().get_mut::<f32>("scale").unwrap();
-	let xsf = i.source_width() as f32 / scale;
-	let ysf = i.source_height() as f32 / scale;
-	i.set_size((xsf as u32, ysf as u32));
-	i.update();
-}
-
-const CURRENT_DIRECTORY: &str = ".";
-const IMAGE_SCALE_DEFAULT: f32 = 1.0;
-const IMAGE_SCALE_FACTOR: f32 = 1.2;
-const IMAGE_SCALE_MIN: f32 = 32.0;
-const IMAGE_SCALE_MAX: f32 = 0.00390625;
-
-fn scale_image_default(i: &mut rouge::Image) {
-	if i.dimensions() != i.source_dimensions() {
-		*i.data_mut().get_mut::<f32>("scale").unwrap() = IMAGE_SCALE_DEFAULT;
-		i.set_size(i.source_dimensions());
-		i.update();
-	}
-}
-
-fn scale_image_up(i: &mut rouge::Image) {
-	let scale = i.data_mut().get_mut::<f32>("scale").unwrap();
-	if *scale > IMAGE_SCALE_MAX {
-		*scale /= IMAGE_SCALE_FACTOR;
-		let sf = *scale;
-		let xsf = i.source_width() as f32 / sf;
-		let ysf = i.source_height() as f32 / sf;
-		i.set_size((xsf as u32, ysf as u32));
-		i.update();
-	}
-}
-
-fn scale_image_down(i: &mut rouge::Image) {
-	let scale = i.data_mut().get_mut::<f32>("scale").unwrap();
-	if *scale < IMAGE_SCALE_MIN {
-		*scale *= IMAGE_SCALE_FACTOR;
-		let sf = *scale;
-		let xsf = i.source_width() as f32 / sf;
-		let ysf = i.source_height() as f32 / sf;
-		i.set_size((xsf as u32, ysf as u32));
-		i.update();
-	}
-}
-
-fn main() {
-	let args = std::env::args().collect::<Vec<_>>();
-	let path = args.get(1);
-	let (name, image) = match path {
-		None => ("".into(), rouge::Image::new()),
-		Some(path) => match File::open(path) {
-			Err(_) => (path.into(), rouge::Image::new()),
-			Ok(image) => {
-				let path = Path::new(path);
-				let directory = match path.parent() {
-					None => Path::new(CURRENT_DIRECTORY),
-					Some(path) => {
-						if let Some(empty) = path.to_str().map(|s| s.is_empty()) {
-							if empty {
-								Path::new(CURRENT_DIRECTORY)
-							} else {
-								path
-							}
-						} else {
-							path
-						}
+		Self {
+			widget: ScrollRegionBuilder::new()
+				.align(Align::middle())
+				.auto_resize(true)
+				.display_scrollbars(true)
+				.enable_panning(true)
+				.scroll_on_arrow_keys(true)
+				.scroll_on_mouse_wheel(false)
+				.grab_on_mouse_middle(true)
+				.build()
+				.with_id("viewer")
+				.widget(image)
+				.with_on_key_map_press(KeyMap::KeyH, |s, e| {
+					if e.only_ctrl() {
+						s.toggle_scrollbars();
 					}
-				};
-				let mut gallery = Gallery::new(directory);
-				gallery.move_to(&path);
-				let image = rouge::Image::from(image)
-					.with_data(Data::new()
-						.with("scale", IMAGE_SCALE_DEFAULT)
-						.with("gallery", gallery)
-						.with("grab", Option::<(i16, i16)>::None))
-					.with_on_click(|i, e| {
-						if let Some(MouseInput::Left) = e.mouse_input() {
-							i.set_opacity(0.5);
-							let data = Some(e.mouse().unwrap().position());
-							*i.data_mut().get_mut::<Option<(i16, i16)>>("grab").unwrap() = data;
-						}
-					})
-					.with_on_release(|i, e| {
-						if let Some(MouseInput::Left) = e.mouse_input() {
-							i.set_opacity(1.0);
-							*i.data_mut().get_mut::<Option<(i16, i16)>>("grab").unwrap() = None;
-						}
-					})
-					.with_on("next", |i, _| image_next(i))
-					.with_on("prev", |i, _| image_prev(i))
-					.with_on("resize", |i, e| {
-						match e.mouse_input() {
-							None => (),
-							Some(input) => match input {
-								MouseInput::Middle => {
-									scale_image_default(i);
-								},
-								MouseInput::ScrollUp => {
-									scale_image_up(i);
-								},
-								MouseInput::ScrollDown => {
-									scale_image_down(i);
-								},
-								_ => ()
-							}
-						}
-					})
-					.with_on("keypress", move |i, e| {
-						if let Some(key) = e.key() {
-							match key.code() {
-								19 | 90 => {
-									scale_image_default(i);
-								},
-								21 | 86 => {
-									scale_image_up(i);
-								},
-								20 | 82 => {
-									scale_image_down(i);
-								},
-								// Left
-								113 | 83 => {
-									image_prev(i);
-								},
-								// Up
-								111 | 80 => {},
-								// Right
-								114 | 85 => {
-									image_next(i);
-								},
-								// Down
-								116 | 88 => {},
-								_ => ()
-							}
-						}
-					});
-				let name = path.file_name()
-					.map(|n| n.to_str()).flatten()
-					.unwrap_or("[filename]").to_string();
-				(name, image)
+				})
+				.with_on_key_map_press(KeyMap::Home, |s, _| s.go_to_top())
+				.with_on_key_map_press(KeyMap::End, |s, _| s.go_to_bottom())
+				.into(),
+			events: rouge::event::Events::new(),
+			scale: Self::SCALE_DEFAULT,
+			gallery
+		}
+			.with_on_scroll_up(|i, e| {
+				if i.unwrap_mut().is_region_position(e.position()) {
+					i.zoom_in();
+				}
+			})
+			.with_on_scroll_down(|i, e| {
+				if i.unwrap_mut().is_region_position(e.position()) {
+					i.zoom_out();
+				}
+			})
+			.with_on_key_press(|i, e| {
+				if let Some(key) = e.keymap() {
+					match key {
+						KeyMap::Digit0 | KeyMap::Numpad0 => {
+							i.reset();
+						},
+						KeyMap::Equal | KeyMap::NumpadAdd => {
+							i.zoom_in();
+						},
+						KeyMap::Minus | KeyMap::NumpadSubtract => {
+							i.zoom_out();
+						},
+						/*KeyMap::ArrowLeft | KeyMap::Numpad4 => {
+							i.prev(None);
+						},
+						KeyMap::ArrowRight | KeyMap::Numpad6 => {
+							i.next(None);
+						},*/
+						KeyMap::ArrowUp | KeyMap::Numpad8 => {},
+						KeyMap::ArrowDown | KeyMap::Numpad2 => {},
+						_ => ()
+					}
+				}
+			})
+	}
+
+	fn image(&self) -> &rouge::Image {
+		self.unwrap().content_as().unwrap()
+	}
+
+	fn image_mut(&mut self) -> &mut rouge::Image {
+		self.unwrap_mut().content_as_mut().unwrap()
+	}
+}
+
+impl rouge::WidgetTime for ImageViewer {}
+
+impl WidgetWrap for ImageViewer {
+	fn root(&self) -> &rouge::WidgetObject {
+		&self.widget
+	}
+
+	fn root_mut(&mut self) -> &mut rouge::WidgetObject {
+		&mut self.widget
+	}
+}
+
+impl WidgetUnwrap for ImageViewer {
+	type Wrapped = ScrollRegion;
+}
+
+trait Viewer {
+	const SCALE_DEFAULT: f64 = 1.0;
+
+	const SCALE_FACTOR: f64 = 1.2;
+
+	const SCALE_MAX: f64 = 0.00390625;
+
+	const SCALE_MIN: f64 = 32.0;
+
+	fn set(&mut self, _: &Path);
+
+	fn next(&mut self, s: Option<Sender>) {
+		let g = self.gallery_mut();
+		if g.size() <= 1 {
+			return;
+		}
+		let path = match g.next() {
+			Some(p) => p.to_string(),
+			_ => return
+		};
+
+		self.set(Path::new(&path));
+		self.scale();
+
+		if let Some(s) = s {
+			if let Some(t) = self.title() {
+				s.emit_with("title", t);
 			}
 		}
-	};
-	
-	let size = match image.dimensions() {
+	}
+
+	fn prev(&mut self, s: Option<Sender>) {
+		let g = self.gallery_mut();
+		if g.size() <= 1 {
+			return;
+		}
+		let path = match g.prev() {
+			Some(p) => p.to_string(),
+			_ => return
+		};
+
+		self.set(Path::new(&path));
+		self.scale();
+
+		if let Some(s) = s {
+			if let Some(t) = self.title() {
+				s.emit_with("title", t);
+			}
+		}
+	}
+
+	fn title(&self) -> Option<String> {
+		let g = self.gallery();
+		let (path, pos, count) = match (g.get(), g.position(), g.size()) {
+			(_, _, 0) => return None,
+			(Some(a), b, c) => (a.to_string(), b + 1, c),
+			_ => return None
+		};
+		let path = Path::new(&path);
+		if let Some(Some(name)) = path.file_name().map(|p| p.to_str()) {
+			Some(match self.source_dimensions() {
+				(0, 0) => format!("{} - {}/{} - Rim", name, pos, count),
+				(w, h) => format!("{} - {}/{} - ({} x {}) - Rim", name, pos, count, w, h)
+			})
+		} else {
+			None
+		}
+	}
+
+	fn zoom_in(&mut self) {
+		if !self.is_valid() {
+			return;
+		}
+		let scale = self.scale_factor();
+		if *scale > Self::SCALE_MAX {
+			*scale /= Self::SCALE_FACTOR;
+			let sf = *scale;
+			let (w, h) = self.source_dimensions();
+			let xsf = w as f64 / sf;
+			let ysf = h as f64 / sf;
+			self.resize((xsf.round() as u32, ysf.round() as u32));
+		}
+	}
+
+	fn zoom_out(&mut self) {
+		if !self.is_valid() {
+			return;
+		}
+		let scale = self.scale_factor();
+		if *scale < Self::SCALE_MIN {
+			*scale *= Self::SCALE_FACTOR;
+			let sf = *scale;
+			let (w, h) = self.source_dimensions();
+			let xsf = w as f64 / sf;
+			let ysf = h as f64 / sf;
+			self.resize((xsf.round() as u32, ysf.round() as u32));
+		}
+	}
+
+	fn reset(&mut self) {
+		if self.dimensions() != self.source_dimensions() {
+			*self.scale_factor() = Self::SCALE_DEFAULT;
+			self.resize(self.source_dimensions());
+		}
+	}
+
+	fn scale(&mut self) {
+		if !self.is_valid() {
+			return;
+		}
+		let scale = *self.scale_factor();
+		let (w, h) = self.source_dimensions();
+		let xsf = w as f64 / scale;
+		let ysf = h as f64 / scale;
+		self.resize((xsf.round() as u32, ysf.round() as u32));
+	}
+
+	fn resize(&mut self, _: (u32, u32));
+
+	fn dimensions(&self) -> (u32, u32);
+
+	fn source_dimensions(&self) -> (u32, u32);
+
+	fn scale_factor(&mut self) -> &mut f64;
+
+	fn gallery(&self) -> &Gallery;
+
+	fn gallery_mut(&mut self) -> &mut Gallery;
+
+	fn is_valid(&self) -> bool;
+}
+
+impl Viewer for ImageViewer {
+	fn set(&mut self, path: &Path) {
+		self.image_mut().set_with_path(path);
+	}
+
+	fn resize(&mut self, size: (u32, u32)) {
+		let i = self.image_mut();
+		if !i.is_valid() {
+			return;
+		}
+		i.set_size(size);
+		i.update();
+		self.update();
+	}
+
+	#[inline(always)]
+	fn dimensions(&self) -> (u32, u32) {
+		rouge::Widget::dimensions(self.image())
+	}
+
+	#[inline(always)]
+	fn source_dimensions(&self) -> (u32, u32) {
+		self.image().source_dimensions()
+	}
+
+	#[inline(always)]
+	fn scale_factor(&mut self) -> &mut f64 {
+		&mut self.scale
+	}
+
+	#[inline(always)]
+	fn gallery(&self) -> &Gallery {
+		&self.gallery
+	}
+
+	#[inline(always)]
+	fn gallery_mut(&mut self) -> &mut Gallery {
+		&mut self.gallery
+	}
+
+	#[inline(always)]
+	fn is_valid(&self) -> bool {
+		self.image().is_valid()
+	}
+}
+
+#[allow(unused_must_use)]
+fn main() {
+	let args = std::env::args();
+	let path = args.skip(1).next().unwrap_or("".into());
+
+	let viewer = ImageViewer::new(Gallery::new(path));
+
+	let title = viewer.title().unwrap_or_else(|| "Rim".into());
+	let size = match Viewer::dimensions(&viewer) {
 		(0, 0) => (320, 240),
-		(a, b) => (a, b)
+		(w, h) => (w.clamp(32, 1280), h.clamp(32, 720))
 	};
-	
-	let title = if image.is_valid() { window_title(&name, size) } else { "Rim".into() };
-	
-	let context = ["Prev", "Next"].iter()
-		.map(|s| rouge::Button::from(s)
-			.with_font(rouge::Font::new(18.0, rouge::Color::Rgb(0xC1, 0xC1, 0xC1)))
-			.without_border()
-			.with_background_color(rouge::Color::Rgb(0x13, 0x16, 0x85))
-			.with_on_click(|b, e| {
-				if let Some(MouseInput::Left) = e.mouse_input() {
-					b.emit(&b.get_text().to_lowercase());
-				}
-			}))
-		.collect::<rouge::List>()
+
+	let icon = |path, sig| {
+		rouge::Image::from_path(path)
+			.with_padding(4)
+			.with_background_color(Color::Rgb(0x34, 0x34, 0x34))
+			.with_on_left_click(move |b, _| b.emit(sig))
+	};
+
+	let toolbar = rouge::List::new()
 		.horizontal()
-		.with_relay_bind(true);
-	
+		.space(Space::horizontal())
+		.with_id("toolbar")
+		.with_background_color(Color::Rgb(0x34, 0x34, 0x34))
+		.with_relay_bind(true)
+		.widget(icon(concat!(env!("CARGO_MANIFEST_DIR"), "/icon/prev.png"), "prev"))
+		.widget(icon(concat!(env!("CARGO_MANIFEST_DIR"), "/icon/next.png"), "next"))
+		.widget(icon(concat!(env!("CARGO_MANIFEST_DIR"), "/icon/in.png"), "in"))
+		.widget(icon(concat!(env!("CARGO_MANIFEST_DIR"), "/icon/out.png"), "out"))
+		.widget(icon(concat!(env!("CARGO_MANIFEST_DIR"), "/icon/default.png"), "default"));
+
 	rouge::main(async {
 		rouge::App::new()
 			.window(rouge::Window::new()
 				.title(title)
 				.resize(size)
 				.visible(true)
+				.align(Align::top_left())
 				.with_background_color(Color::Rgb(0x24, 0x25, 0x26))
-				.with_on_click(|w, e| { w[0][0].trigger_context("resize", e); w.update();})
-				.with_bind("title", |w, d| {
-					if let Some(Ok(title)) = d.map(|d| d.into::<String>()) {
-						w.set_title(title);
+				.with_bind("next", |w| {
+					let s = w.channel();
+					w.find_in_all_as_mut::<ImageViewer>("viewer")
+						.unwrap()
+						.next(Some(s));
+					w.update();
+				})
+				.with_bind("prev", |w| {
+					let s = w.channel();
+					w.find_in_all_as_mut::<ImageViewer>("viewer")
+						.unwrap()
+						.prev(Some(s));
+					w.update();
+				})
+				.with_bind("in", |w| {
+					w.find_in_all_as_mut::<ImageViewer>("viewer")
+						.unwrap()
+						.zoom_in();
+					w.update();
+				})
+				.with_bind("out", |w| {
+					w.find_in_all_as_mut::<ImageViewer>("viewer")
+						.unwrap()
+						.zoom_out();
+					w.update();
+				})
+				.with_bind("default", |w| {
+					w.find_in_all_as_mut::<ImageViewer>("viewer")
+						.unwrap()
+						.reset();
+					w.update();
+				})
+				.with_bind_data::<String, _>("title", |w, title| w.set_title(title))
+				.with_on_key_press(|w, e| {
+					if let Some(key) = e.keymap() {
+						match key {
+							KeyMap::KeyT => {
+								if e.only_ctrl() {
+									w.find_mut_in_all("toolbar")
+										.unwrap()
+										.toggle_mapped();
+									w.update();
+								}
+							},
+							KeyMap::ArrowLeft | KeyMap::Numpad4 => {
+								if e.only_shift() {
+									let s = w.channel();
+									w.find_in_all_as_mut::<ImageViewer>("viewer")
+										.unwrap()
+										.prev(Some(s));
+									w.update();
+								}
+							},
+							KeyMap::ArrowRight | KeyMap::Numpad6 => {
+								if e.only_shift() {
+									let s = w.channel();
+									w.find_in_all_as_mut::<ImageViewer>("viewer")
+										.unwrap()
+										.next(Some(s));
+									w.update();
+								}
+							},
+							KeyMap::F11 => {
+								let v = w.data().get("fs").cloned().unwrap_or(true);
+								w.set_fullscreen(v);
+								w.data_mut().set("fs", !v);
+							}
+							_ => ()
+						}
 					}
 				})
-				.with_bind("next", |w, _| w[0][0].trigger("next"))
-				.with_bind("prev", |w, _| w[0][0].trigger("prev"))
-				.widget(rouge::Stack::new()
+				.widget(rouge::List::new()
+					.space(Space::both())
 					.with_relay_bind(true)
-					.widget(image)
-					.widget(context)))
+					.widget(toolbar)
+					.widget(viewer)))
 	});
 }
