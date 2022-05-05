@@ -43,23 +43,26 @@ struct Gallery {
 impl Gallery {
 	fn new<P>(path: P) -> Self
 	where P: AsRef<Path> {
-		let path = path.as_ref();
-		let current = |p: &Path| match std::env::current_dir() {
-			Ok(p) => p,
-			_ => p.to_path_buf()
-		};
+		let mut path = path.as_ref().to_path_buf();
 		let directory = if path.is_dir() {
-			path.to_path_buf()
+			path.clone()
 		} else {
 			match path.parent() {
-				Some(p) => {
-					if p == Path::new("") {
-						current(p)
+				Some(d) => {
+					if d == Path::new("") {
+						let dir = Path::new(".").to_path_buf();
+						if path.is_relative() {
+							path = [&dir, &path].iter().collect();
+						}
+						dir
 					} else {
-						p.to_path_buf()
+						d.to_path_buf()
 					}
 				},
-				_ => current(path)
+				_ => match std::env::current_dir() {
+					Ok(i) => i,
+					_ => path.clone()
+				}
 			}
 		};
 		let images = {
