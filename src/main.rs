@@ -20,7 +20,7 @@ fn get_image_paths<P: AsRef<Path>>(path: P) -> Vec<String> {
 		.into_iter()
 		.filter_map(|e| e.ok().map(|e| e.path()))
 		.filter(|e| match e.extension().map(|e| e.to_str()).flatten() {
-			Some(ext) => match ext {
+			Some(ext) => match ext.to_lowercase().as_str() {
 				"bmp" | "ico" | "jpg" | "jpeg" | "gif" |
 				"png" | "tiff" | "webp" | "avif" | "pnm" |
 				"dds" | "tga" => true,
@@ -62,7 +62,15 @@ impl Gallery {
 				_ => current(path)
 			}
 		};
-		let images = get_image_paths(&directory);
+		let images = {
+			let mut i = get_image_paths(&directory);
+			if path.extension().is_none() && path.is_file() {
+				if let Some(e) = path.to_str().map(|e| e.to_string()) {
+					i.push(e);
+				}
+			}
+			i
+		};
 		let index = images.iter().position(|i| Path::new(i) == path).unwrap_or(0);
 
 		Self {
@@ -161,21 +169,11 @@ impl ImageViewer {
 			.with_on_key_press(|i, e| {
 				if let Some(key) = e.keymap() {
 					match key {
-						KeyMap::Digit0 | KeyMap::Numpad0 => {
-							i.reset();
-						},
-						KeyMap::Equal | KeyMap::NumpadAdd => {
-							i.zoom_in();
-						},
-						KeyMap::Minus | KeyMap::NumpadSubtract => {
-							i.zoom_out();
-						},
-						/*KeyMap::ArrowLeft | KeyMap::Numpad4 => {
-							i.prev(None);
-						},
-						KeyMap::ArrowRight | KeyMap::Numpad6 => {
-							i.next(None);
-						},*/
+						KeyMap::Digit0 | KeyMap::Numpad0 => i.reset(),
+						KeyMap::Equal | KeyMap::NumpadAdd => i.zoom_in(),
+						KeyMap::Minus | KeyMap::NumpadSubtract => i.zoom_out(),
+						/*KeyMap::ArrowLeft | KeyMap::Numpad4 => i.prev(None),
+						KeyMap::ArrowRight | KeyMap::Numpad6 => i.next(None),*/
 						KeyMap::ArrowUp | KeyMap::Numpad8 => {},
 						KeyMap::ArrowDown | KeyMap::Numpad2 => {},
 						_ => ()
@@ -419,6 +417,24 @@ fn main() {
 		.widget(icon(concat!(env!("CARGO_MANIFEST_DIR"), "/icon/out.png"), "out"))
 		.widget(icon(concat!(env!("CARGO_MANIFEST_DIR"), "/icon/default.png"), "default"));
 
+	let mut fs = false;
+
+	fn find<'a>(w: &'a mut rouge::Window) -> &'a mut ImageViewer {
+		w.find_in_all_as_mut::<ImageViewer>("viewer").unwrap()
+	}
+
+	let prev = |w: &mut rouge::Window| {
+		let s = w.channel();
+		find(w).prev(Some(s));
+		w.update();
+	};
+
+	let next = |w: &mut rouge::Window| {
+		let s = w.channel();
+		find(w).next(Some(s));
+		w.update();
+	};
+
 	rouge::main(async {
 		rouge::App::new()
 			.window(rouge::Window::new()
@@ -427,40 +443,22 @@ fn main() {
 				.visible(true)
 				.align(Align::top_left())
 				.with_background_color(Color::Rgb(0x24, 0x25, 0x26))
-				.with_bind("next", |w| {
-					let s = w.channel();
-					w.find_in_all_as_mut::<ImageViewer>("viewer")
-						.unwrap()
-						.next(Some(s));
-					w.update();
-				})
-				.with_bind("prev", |w| {
-					let s = w.channel();
-					w.find_in_all_as_mut::<ImageViewer>("viewer")
-						.unwrap()
-						.prev(Some(s));
-					w.update();
-				})
+				.with_bind("next", move |w| next(w))
+				.with_bind("prev", move |w| prev(w))
 				.with_bind("in", |w| {
-					w.find_in_all_as_mut::<ImageViewer>("viewer")
-						.unwrap()
-						.zoom_in();
+					find(w).zoom_in();
 					w.update();
 				})
 				.with_bind("out", |w| {
-					w.find_in_all_as_mut::<ImageViewer>("viewer")
-						.unwrap()
-						.zoom_out();
+					find(w).zoom_out();
 					w.update();
 				})
 				.with_bind("default", |w| {
-					w.find_in_all_as_mut::<ImageViewer>("viewer")
-						.unwrap()
-						.reset();
+					find(w).reset();
 					w.update();
 				})
 				.with_bind_data::<String, _>("title", |w, title| w.set_title(title))
-				.with_on_key_press(|w, e| {
+				.with_on_key_press(move |w, e| {
 					if let Some(key) = e.keymap() {
 						match key {
 							KeyMap::KeyT => {
@@ -473,26 +471,21 @@ fn main() {
 							},
 							KeyMap::ArrowLeft | KeyMap::Numpad4 => {
 								if e.only_shift() {
-									let s = w.channel();
-									w.find_in_all_as_mut::<ImageViewer>("viewer")
-										.unwrap()
-										.prev(Some(s));
-									w.update();
+									prev(w);
 								}
 							},
 							KeyMap::ArrowRight | KeyMap::Numpad6 => {
 								if e.only_shift() {
-									let s = w.channel();
-									w.find_in_all_as_mut::<ImageViewer>("viewer")
-										.unwrap()
-										.next(Some(s));
-									w.update();
+									next(w);
 								}
 							},
+							KeyMap::PageUp => prev(w),
+							KeyMap::PageDown => next(w),
 							KeyMap::F11 => {
-								let v = w.data().get("fs").cloned().unwrap_or(true);
-								w.set_fullscreen(v);
-								w.data_mut().set("fs", !v);
+								w.set_fullscreen({
+									fs = !fs;
+									fs
+								});
 							}
 							_ => ()
 						}
