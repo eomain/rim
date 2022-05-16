@@ -128,7 +128,7 @@ struct ImageViewer {
 }
 
 impl ImageViewer {
-	fn new(gallery: Gallery) -> Self {
+	fn new(id: &str, gallery: Gallery) -> Self {
 		let image = if let Some(path) = gallery.get() {
 			rouge::Image::from_path(path)
 		} else {
@@ -145,7 +145,7 @@ impl ImageViewer {
 				.scroll_on_mouse_wheel(false)
 				.grab_on_mouse_middle(true)
 				.build()
-				.with_id("viewer")
+				.with_id(id)
 				.widget(image)
 				.with_on_key_map_press(KeyMap::KeyH, |s, e| {
 					if e.only_ctrl() {
@@ -219,6 +219,8 @@ trait Viewer {
 
 	const SCALE_MIN: f64 = 32.0;
 
+	const TITLE: &'static str = "title";
+
 	fn set(&mut self, _: &Path);
 
 	fn next(&mut self, s: Option<Sender>) {
@@ -236,7 +238,7 @@ trait Viewer {
 
 		if let Some(s) = s {
 			if let Some(t) = self.title() {
-				s.emit_with("title", t);
+				s.emit_with(Self::TITLE, t);
 			}
 		}
 	}
@@ -256,7 +258,7 @@ trait Viewer {
 
 		if let Some(s) = s {
 			if let Some(t) = self.title() {
-				s.emit_with("title", t);
+				s.emit_with(Self::TITLE, t);
 			}
 		}
 	}
@@ -388,12 +390,20 @@ impl Viewer for ImageViewer {
 	}
 }
 
+const VIEWER: &str = "viewer";
+const TOOLBAR: &str = "toolbar";
+const NEXT: &str = "next";
+const PREV: &str = "prev";
+const IN: &str = "in";
+const OUT: &str = "out";
+const DEFAULT: &str = "default";
+
 #[allow(unused_must_use)]
 fn main() {
 	let args = std::env::args();
 	let path = args.skip(1).next().unwrap_or("".into());
 
-	let viewer = ImageViewer::new(Gallery::new(path));
+	let viewer = ImageViewer::new(VIEWER, Gallery::new(path));
 
 	let title = viewer.title().unwrap_or_else(|| "Rim".into());
 	let size = match Viewer::dimensions(&viewer) {
@@ -411,19 +421,19 @@ fn main() {
 	let toolbar = rouge::List::new()
 		.horizontal()
 		.space(Space::horizontal())
-		.with_id("toolbar")
+		.with_id(TOOLBAR)
 		.with_background_color(Color::Rgb(0x34, 0x34, 0x34))
 		.with_relay_bind(true)
-		.widget(icon(concat!(env!("CARGO_MANIFEST_DIR"), "/icon/prev.png"), "prev"))
-		.widget(icon(concat!(env!("CARGO_MANIFEST_DIR"), "/icon/next.png"), "next"))
-		.widget(icon(concat!(env!("CARGO_MANIFEST_DIR"), "/icon/in.png"), "in"))
-		.widget(icon(concat!(env!("CARGO_MANIFEST_DIR"), "/icon/out.png"), "out"))
-		.widget(icon(concat!(env!("CARGO_MANIFEST_DIR"), "/icon/default.png"), "default"));
+		.widget(icon(concat!(env!("CARGO_MANIFEST_DIR"), "/icon/prev.png"), PREV))
+		.widget(icon(concat!(env!("CARGO_MANIFEST_DIR"), "/icon/next.png"), NEXT))
+		.widget(icon(concat!(env!("CARGO_MANIFEST_DIR"), "/icon/in.png"), IN))
+		.widget(icon(concat!(env!("CARGO_MANIFEST_DIR"), "/icon/out.png"), OUT))
+		.widget(icon(concat!(env!("CARGO_MANIFEST_DIR"), "/icon/default.png"), DEFAULT));
 
 	let mut fs = false;
 
 	fn find<'a>(w: &'a mut rouge::Window) -> &'a mut ImageViewer {
-		w.find_in_all_as_mut::<ImageViewer>("viewer").unwrap()
+		w.find_in_all_as_mut::<ImageViewer>(VIEWER).unwrap()
 	}
 
 	let prev = |w: &mut rouge::Window| {
@@ -446,27 +456,27 @@ fn main() {
 				.visible(true)
 				.align(Align::top_left())
 				.with_background_color(Color::Rgb(0x24, 0x25, 0x26))
-				.with_bind("next", move |w| next(w))
-				.with_bind("prev", move |w| prev(w))
-				.with_bind("in", |w| {
+				.with_bind(NEXT, move |w| next(w))
+				.with_bind(PREV, move |w| prev(w))
+				.with_bind(IN, |w| {
 					find(w).zoom_in();
 					w.update();
 				})
-				.with_bind("out", |w| {
+				.with_bind(OUT, |w| {
 					find(w).zoom_out();
 					w.update();
 				})
-				.with_bind("default", |w| {
+				.with_bind(DEFAULT, |w| {
 					find(w).reset();
 					w.update();
 				})
-				.with_bind_data::<String, _>("title", |w, title| w.set_title(title))
+				.with_bind_data::<String, _>(ImageViewer::TITLE, |w, t| w.set_title(t))
 				.with_on_key_press(move |w, e| {
 					if let Some(key) = e.keymap() {
 						match key {
 							KeyMap::KeyT => {
 								if e.only_ctrl() {
-									w.find_mut_in_all("toolbar")
+									w.find_mut_in_all(TOOLBAR)
 										.unwrap()
 										.toggle_mapped();
 									w.update();
