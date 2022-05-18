@@ -1,6 +1,6 @@
 [package]
 name = "rim"
-version = "0.2.2"
+version = "0.3.0"
 authors = ["eomain"]
 description = "Rouge image viewer"
 edition = "2018"

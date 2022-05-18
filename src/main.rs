@@ -123,6 +123,7 @@ impl Gallery {
 struct ImageViewer {
 	widget: rouge::WidgetObject,
 	events: rouge::event::Events<Self>,
+	zoom: i8,
 	scale: f64,
 	gallery: Gallery
 }
@@ -156,6 +157,7 @@ impl ImageViewer {
 				.with_on_key_map_press(KeyMap::End, |s, _| s.go_to_bottom())
 				.into(),
 			events: rouge::event::Events::new(),
+			zoom: 0,
 			scale: Self::SCALE_DEFAULT,
 			gallery
 		}
@@ -210,7 +212,38 @@ impl WidgetUnwrap for ImageViewer {
 	type Wrapped = ScrollRegion;
 }
 
+#[derive(Debug, Copy, Clone, PartialEq)]
+enum Zoom {
+	In(u8),
+	Out(u8)
+}
+
+impl Zoom {
+	fn positioning(self, (x, y): (u32, u32), (w, h): (u32, u32)) -> (i32, i32) {
+		match self {
+			Self::In(i) => {
+				let i = i as u32;
+				let (x, y) = ((x / i) + ((w / i) / 2), (y / i) + ((h / i) / 2));
+				(x as i32, y as i32)
+			},
+			Self::Out(i) => {
+				let i = i as u32;
+				let (wp, hp) = ((w / i) / 2, (h / i) / 2);
+				let x = if x > wp { ((x - wp) / (i + 1)) + wp } else { 0 };
+				let y = if y > hp { ((y - hp) / (i + 1)) + hp } else { 0 };
+				(-(x as i32), -(y as i32))
+			}
+		}
+	}
+}
+
 trait Viewer {
+	const ZOOM_FACTOR: u8 = 5;
+
+	const ZOOM_IN: Zoom = Zoom::In(Self::ZOOM_FACTOR);
+
+	const ZOOM_OUT: Zoom = Zoom::Out(Self::ZOOM_FACTOR);
+
 	const SCALE_DEFAULT: f64 = 1.0;
 
 	const SCALE_FACTOR: f64 = 1.2;
@@ -285,14 +318,19 @@ trait Viewer {
 		if !self.is_valid() {
 			return;
 		}
-		let scale = self.scale_factor();
-		if *scale > Self::SCALE_MAX {
-			*scale /= Self::SCALE_FACTOR;
-			let sf = *scale;
-			let (w, h) = self.source_dimensions();
-			let xsf = w as f64 / sf;
-			let ysf = h as f64 / sf;
-			self.resize((xsf.round() as u32, ysf.round() as u32));
+		if self.scale_factor() > Self::SCALE_MAX {
+			let (x, y) = Self::ZOOM_IN.positioning(self.position(), self.viewport_dimensions());
+			{
+				let scale = self.scale_factor_mut();
+				*scale /= Self::SCALE_FACTOR;
+				let sf = *scale;
+				let (w, h) = self.source_dimensions();
+				let xsf = w as f64 / sf;
+				let ysf = h as f64 / sf;
+				self.resize((xsf.round() as u32, ysf.round() as u32));
+			}
+			self.move_by(x, y);
+			*self.zoom_level_mut() += 1;
 		}
 	}
 
@@ -300,21 +338,33 @@ trait Viewer {
 		if !self.is_valid() {
 			return;
 		}
-		let scale = self.scale_factor();
-		if *scale < Self::SCALE_MIN {
-			*scale *= Self::SCALE_FACTOR;
-			let sf = *scale;
-			let (w, h) = self.source_dimensions();
-			let xsf = w as f64 / sf;
-			let ysf = h as f64 / sf;
-			self.resize((xsf.round() as u32, ysf.round() as u32));
+		if self.scale_factor() < Self::SCALE_MIN {
+			let (x, y) = Self::ZOOM_OUT.positioning(self.position(), self.viewport_dimensions());
+			{
+				let scale = self.scale_factor_mut();
+				*scale *= Self::SCALE_FACTOR;
+				let sf = *scale;
+				let (w, h) = self.source_dimensions();
+				let xsf = w as f64 / sf;
+				let ysf = h as f64 / sf;
+				self.resize((xsf.round() as u32, ysf.round() as u32));
+			}
+			self.move_by(x, y);
+			*self.zoom_level_mut() -= 1;
 		}
 	}
 
 	fn reset(&mut self) {
-		if self.dimensions() != self.source_dimensions() {
-			*self.scale_factor() = Self::SCALE_DEFAULT;
-			self.resize(self.source_dimensions());
+		if !self.is_valid() {
+			return;
+		}
+		let dim = self.dimensions();
+		let src = self.source_dimensions();
+		if dim != src {
+			let zoom = if dim > src { Self::zoom_out } else { Self::zoom_in };
+			while self.zoom_level() != 0 {
+				zoom(self);
+			}
 		}
 	}
 
@@ -322,7 +372,7 @@ trait Viewer {
 		if !self.is_valid() {
 			return;
 		}
-		let scale = *self.scale_factor();
+		let scale = self.scale_factor();
 		let (w, h) = self.source_dimensions();
 		let xsf = w as f64 / scale;
 		let ysf = h as f64 / scale;
@@ -331,11 +381,23 @@ trait Viewer {
 
 	fn resize(&mut self, _: (u32, u32));
 
+	fn move_by(&mut self, x: i32, y: i32);
+
 	fn dimensions(&self) -> (u32, u32);
 
 	fn source_dimensions(&self) -> (u32, u32);
 
-	fn scale_factor(&mut self) -> &mut f64;
+	fn position(&self) -> (u32, u32);
+
+	fn viewport_dimensions(&self) -> (u32, u32);
+
+	fn zoom_level(&self) -> i8;
+
+	fn zoom_level_mut(&mut self) -> &mut i8;
+
+	fn scale_factor(&self) -> f64;
+
+	fn scale_factor_mut(&mut self) -> &mut f64;
 
 	fn gallery(&self) -> &Gallery;
 
@@ -359,6 +421,10 @@ impl Viewer for ImageViewer {
 		self.update();
 	}
 
+	fn move_by(&mut self, x: i32, y: i32) {
+		self.unwrap_mut().move_by(x, y);
+	}
+
 	#[inline(always)]
 	fn dimensions(&self) -> (u32, u32) {
 		rouge::Widget::dimensions(self.image())
@@ -369,8 +435,32 @@ impl Viewer for ImageViewer {
 		self.image().source_dimensions()
 	}
 
+	#[inline]
+	fn position(&self) -> (u32, u32) {
+		self.unwrap().position()
+	}
+
+	#[inline]
+	fn viewport_dimensions(&self) -> (u32, u32) {
+		self.unwrap().region().dimensions()
+	}
+
+	#[inline]
+	fn zoom_level(&self) -> i8 {
+		self.zoom
+	}
+
+	fn zoom_level_mut(&mut self) -> &mut i8 {
+		&mut self.zoom
+	}
+
 	#[inline(always)]
-	fn scale_factor(&mut self) -> &mut f64 {
+	fn scale_factor(&self) -> f64 {
+		self.scale
+	}
+
+	#[inline(always)]
+	fn scale_factor_mut(&mut self) -> &mut f64 {
 		&mut self.scale
 	}
 
@@ -419,8 +509,8 @@ fn main() {
 	};
 
 	let toolbar = rouge::List::new()
-		.horizontal()
-		.space(Space::horizontal())
+		.vertical()
+		.space(Space::vertical())
 		.with_id(TOOLBAR)
 		.with_background_color(Color::Rgb(0x34, 0x34, 0x34))
 		.with_relay_bind(true)
@@ -505,6 +595,7 @@ fn main() {
 					}
 				})
 				.widget(rouge::List::new()
+					.horizontal()
 					.space(Space::both())
 					.with_relay_bind(true)
 					.widget(toolbar)
